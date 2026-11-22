@@ -29,33 +29,10 @@ jobs:
           check-latest: true
           cache: true
           cache-dependency-path: go.sum
-      # Custom publishers (the R2 upload below) run last, after the GitHub release
-      # exists. Fail here, before building or publishing, if the R2 secrets are missing.
-      - name: Check R2 configuration
-        run: sh scripts/upload-r2.sh --check-config
-        env:
-          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      - name: Import GPG key
-        id: import_gpg
-        uses: crazy-max/ghaction-import-gpg@2dc316deee8e90f13e1a351ab510b4d5bc0c82cd # v7
-        with:
-          gpg_private_key: ${{ secrets.GPGSIGN_KEY }}
-          passphrase: ${{ secrets.GPGSIGN_PASSPHRASE }}
       - name: goreleaser
         uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7
         with:
-          distribution: goreleaser-pro
           version: "~> v2"
-          args: release
+          args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
-          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          GPGSIGN_PASSPHRASE: ${{ secrets.GPGSIGN_PASSPHRASE }}
-          GPG_FINGERPRINT: ${{ steps.import_gpg.outputs.fingerprint }}

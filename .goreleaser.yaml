@@ -96,44 +96,6 @@ builds:
   ldflags: *ldflags
   binary: bh
 
-# Uploads the release artifacts to Cloudflare R2. A `blobs:` entry is
-# not used here since the blob pipe authenticates from the global
-# AWS_* env with no per-entry credentials; `publishers:` supports
-# per-entry `env:` instead, so it's used to invoke
-# scripts/upload-r2.sh once per artifact. Custom publishers inherit
-# almost nothing from the environment, hence the explicit R2_*
-# forwarding below.
-#
-# This publisher fires more than once per distinct key because
-# goreleaser's release pipe already registers `release.extra_files`
-# (./**.xz and ./**.xz.sha256, see the `release:` block below) as
-# UploadableFile artifacts, and `internal/exec`'s filterArtifacts
-# appends this block's own extra_files with no de-duplication. It
-# can't be globbed away, since gobwas/glob (via goreleaser/fileglob)
-# has no substring-exclusion matcher. It's harmless: PUT is
-# idempotent, and the `./**.xz` glob below is kept deliberately so
-# this publisher declares its own complete file set rather than
-# implicitly depending on the `release:` block's globs.
-#
-# checksum: true mirrors goreleaser's generated checksums.txt;
-# signature: true additionally mirrors checksums.txt.sig, which the
-# `signs:` block below produces by GPG-signing that checksum file.
-# Without signature: true, artifacts downloaded from the R2 mirror
-# would have no signature file to verify against.
-publishers:
-  - name: cloudflare-r2
-    checksum: true
-    signature: true
-    extra_files:
-      - glob: ./**.xz
-      - glob: ./**.sha256
-    cmd: sh scripts/upload-r2.sh {{ abs .ArtifactPath }} branchspire-cli/{{ .Version }}/{{ .ArtifactName }}
-    env:
-      - R2_ENDPOINT={{ index .Env "R2_ENDPOINT" }}
-      - R2_BUCKET={{ index .Env "R2_BUCKET" }}
-      - R2_ACCESS_KEY_ID={{ index .Env "R2_ACCESS_KEY_ID" }}
-      - R2_SECRET_ACCESS_KEY={{ index .Env "R2_SECRET_ACCESS_KEY" }}
-
 archives:
   - ids:
       - branchspire-cli
@@ -147,7 +109,7 @@ nfpms:
     package_name: branchspire-cli
     file_name_template: "{{ .ConventionalFileName }}"
     vendor: BranchSpire
-    homepage: https://gitlab.com/aayushpokhrel49/branchspire-cli
+    homepage: https://github.com/aayushpokhrel49/branchspire-cli
     maintainer: The BranchSpire Authors
     description: The official CLI for BranchSpire
     license: MIT
@@ -174,19 +136,8 @@ checksum:
   extra_files:
       - glob: ./**.xz
 
-signs:
-  -
-    signature: "${artifact}.sig"
-    artifacts: checksum
-    stdin: '{{ .Env.GPGSIGN_PASSPHRASE }}'
-    args: ["--batch", "-u", "{{ .Env.GPG_FINGERPRINT }}", "--output", "${signature}", "--detach-sign", "${artifact}"]
-
 snapshot:
   version_template: "{{ .Branch }}-devel"
-
-nightly:
-  # the release host caches a version directory for a year; only one named nightly is replaced quickly.
-  version_template: "{{ .Branch }}-nightly"
 
 release:
   prerelease: auto
@@ -197,5 +148,5 @@ release:
     - glob: ./**.xz
     - glob: ./**.xz.sha256
 
-# yaml-language-server: $schema=https://goreleaser.com/static/schema-pro.json
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
 # vim: set ts=2 sw=2 tw=0 fo=cnqoj
