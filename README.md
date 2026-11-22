@@ -4,7 +4,7 @@
 ![CI](https://github.com/aayushpokhrel49/branchspire-cli/actions/workflows/test-pr.yml/badge.svg)
 ![Nightly](https://github.com/aayushpokhrel49/branchspire-cli/actions/workflows/release-nightly.yml/badge.svg)
 
-`bh` is the command-line client for [BranchSpire](https://gitlab.com/aayushpokhrel49/branchspire),
+`bh` is the command-line client for [BranchSpire](https://github.com/aayushpokhrel49/Branchspire),
 a self-hosted Git service. It manages repositories, issues, pull requests, releases, Actions,
 packages and the rest of the BranchSpire API with explicit commands that work equally well in a
 terminal, a script or CI. BranchSpire 28 or newer is required.
@@ -19,7 +19,7 @@ bh pr merge 123 --repo owner/repository --squash --yes
 
 Run `bh --help` or `bh <command> --help` for the full command reference.
 
-## Why `bh`
+## Features
 
 - **Scriptable output.** `--json`, `--jq`, `--csv` and `--template` select and format data.
   `bh schema` lists every selectable field with its type. Fields are only ever added, so
@@ -42,23 +42,22 @@ The script downloads a release, verifies its SHA-256 checksum and installs `bh`.
 installs the latest build of `main`. Later, `bh upgrade` upgrades it the same way.
 
 ```sh
-curl -fsSL https://gitlab.com/aayushpokhrel49/branchspire-cli/-/raw/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/aayushpokhrel49/branchspire-cli/main/scripts/install.sh | sh
 # latest nightly
-curl -fsSL https://gitlab.com/aayushpokhrel49/branchspire-cli/-/raw/main/scripts/install.sh | sh -s -- --nightly
+curl -fsSL https://raw.githubusercontent.com/aayushpokhrel49/branchspire-cli/main/scripts/install.sh | sh -s -- --nightly
 ```
 
 On Windows, in PowerShell (this also adds `bh` to your PATH):
 
 ```powershell
-irm https://gitlab.com/aayushpokhrel49/branchspire-cli/-/raw/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/aayushpokhrel49/branchspire-cli/main/scripts/install.ps1 | iex
 # latest nightly
-$env:GITEA_CLI_VERSION = 'nightly'; irm https://gitlab.com/aayushpokhrel49/branchspire-cli/-/raw/main/scripts/install.ps1 | iex
+$env:GITEA_CLI_VERSION = 'nightly'; irm https://raw.githubusercontent.com/aayushpokhrel49/branchspire-cli/main/scripts/install.ps1 | iex
 ```
 
 ### Other options
 
 - Prebuilt binaries and packages: [releases](https://github.com/aayushpokhrel49/branchspire-cli/releases).
-- Docker: `docker run --rm aayushpokhrel49/branchspire-cli --help` ([image](https://hub.docker.com/r/aayushpokhrel49/branchspire-cli)).
 - From source: [build from source](#build-from-source).
 
 ## Authentication
@@ -76,9 +75,6 @@ Alternatively, `bh auth login --host https://branchspire.example --oauth` author
 
 Check the active account with `bh auth status --verify`. For CI, supply `GITEA_TOKEN` together
 with `GITEA_CLI_HOST` or `GITEA_INSTANCE_URL`; environment credentials are never persisted.
-
-If you came from `tea`, [the migration guide](docs/migrating-from-tea.md) maps its commands and
-flags to `bh`.
 
 ## Scripting
 
@@ -117,8 +113,7 @@ The following environment variables are supported:
 | `GITEA_CLI_ERROR_FORMAT=json` | JSON errors on stderr |
 | `GITEA_CLI_NO_UPDATE_NOTIFIER=1` | Disable the release check |
 
-The `GITEA_*` names are kept for compatibility with existing deployments and BranchSpire's
-Gitea-compatible configuration.
+The `GITEA_*` names are retained so existing scripts and CI keep working.
 
 ### Shell completion
 
@@ -152,7 +147,7 @@ An [agent skill](https://agentskills.io) teaches coding agents to drive `bh`: in
 opening pull requests from issues, reviewing and merging.
 
 ```sh
-npx skills add https://gitlab.com/aayushpokhrel49/branchspire-cli.git --skill bh
+npx skills add https://github.com/aayushpokhrel49/branchspire-cli.git --skill bh
 npx skills update bh
 ```
 
@@ -161,7 +156,7 @@ npx skills update bh
 Go 1.27 or newer and GNU Make (`gmake` on OpenBSD) are required.
 
 ```sh
-git clone https://gitlab.com/aayushpokhrel49/branchspire-cli.git
+git clone https://github.com/aayushpokhrel49/branchspire-cli.git
 cd branchspire-cli
 make        # builds ./bh
 make install
@@ -176,7 +171,7 @@ Fork, patch, push, open a pull request. Useful targets:
 
 ```sh
 make test       # unit tests
-make vet        # go vet and gitea-vet
+make vet        # static checks
 make lint       # golangci-lint
 make build      # production binary
 make docs       # regenerate reference, man pages and completions
@@ -187,5 +182,4 @@ testing strategy and review process.
 
 ## License
 
-MIT. See [LICENSE](LICENSE). Attribution to the original Gitea authors is preserved in the
-source files.
+MIT. See [LICENSE](LICENSE). Upstream attribution is preserved in the source headers.

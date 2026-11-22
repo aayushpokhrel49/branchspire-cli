@@ -158,7 +158,3 @@ build: $(EXECUTABLE)
 
 $(EXECUTABLE): $(SOURCES)
 	$(GO) build $(BUILDMODE) $(GOFLAGS) -o $@ ./cmd/bh
-
-.PHONY: build-image
-build-image:
-	docker build -t aayushpokhrel49/branchspire-cli:$(BUILD_VERSION_TAG) .
