@@ -1,0 +1,386 @@
+// Copyright 2026 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
+package app
+
+import (
+	"errors"
+	"fmt"
+	"slices"
+	"strconv"
+	"strings"
+
+	"gitea.dev/cli/internal/clierr"
+	"gitea.dev/cli/internal/services"
+	"gitea.dev/cli/internal/terminal"
+
+	"github.com/spf13/cobra"
+)
+
+func (a *application) pullEditCommand() *cobra.Command {
+	var title, body, file, base, deadline, milestone string
+	var draft, ready, maintainer, useEditor, removeMilestone bool
+	var metadata metadataFlags
+	var reviewers services.ReviewRequestChanges
+	var addProjects, removeProjects []string
+	var dependencies dependencyFlags
+	cmd := &cobra.Command{Use: "edit [<number> | <url> | <branch>]", Short: "Edit a pull request", Long: `Edit the title, body, base branch, reviewers, labels, assignees, milestone or due date of a
+pull request, or mark it as a draft or ready for review. Without flags on a terminal, a form edits
+the title, base branch, body, assignees, milestone, labels and due date, starting from their
+current values, and sends only what changed.
+
+BranchSpire changes the milestone, assignees and due date only for people who can write to the pull
+requests of the repository, and leaves them as they were for the author of a pull request who
+cannot: bh then names the flags or form fields it left out and fails. BranchSpire refuses their label changes
+outright, so bh sends the other changes first.
+
+--add-blocked-by and --remove-blocked-by change which issues or pull requests must be done first,
+--add-blocking and --remove-blocking which ones wait for this pull request; the same flags of bh issue
+edit work on issues. The blocked_by and blocks JSON fields cost extra requests, made only when the
+output includes them.`, Annotations: pullArgumentsAnnotation(nil), Args: usageArgs(cobra.MaximumNArgs(1)), RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+		var editorDraft terminal.Draft
+		defer finishDraft(&editorDraft, &runErr)
+		if err := validateBodySources(cmd); err != nil {
+			return err
+		}
+		if !localFlagsChanged(cmd) {
+			if !a.canPrompt() || a.deps.IssueEditForm == nil {
+				return errPullNothingToEdit
+			}
+			t, n, err := a.pullSelectorAny(cmd, args)
+			if err != nil {
+				return err
+			}
+			return a.editPullInteractively(cmd, t, n)
+		}
+		if draft && ready {
+			return clierr.Wrap(clierr.Usage, errors.New("--draft cannot be combined with --ready"))
+		}
+		if removeMilestone && cmd.Flags().Changed("milestone") {
+			return clierr.Wrap(clierr.Usage, errors.New("--milestone cannot be combined with --remove-milestone"))
+		}
+		if id, err := strconv.ParseInt(milestone, 10, 64); err == nil && id < 0 {
+			return clierr.Wrap(clierr.Usage, errors.New("--milestone must be a milestone title or a positive ID, or 0 for none"))
+		}
+		opts := services.PullEdit{}
+		var err error
+		if opts.Deadline, opts.RemoveDeadline, err = editDeadline(cmd, deadline); err != nil {
+			return err
+		}
+		if cmd.Flags().Changed("add-reviewer") || cmd.Flags().Changed("remove-reviewer") {
+			trimNames(reviewers.Add.Users, reviewers.Remove.Users)
+			if reviewers.Add.Users, reviewers.Add.Teams, err = splitReviewers("add-reviewer", reviewers.Add.Users); err != nil {
+				return err
+			}
+			if reviewers.Remove.Users, reviewers.Remove.Teams, err = splitReviewers("remove-reviewer", reviewers.Remove.Users); err != nil {
+				return err
+			}
+			if err := reviewers.Validate(); err != nil {
+				return clierr.Wrap(clierr.Usage, err)
+			}
+			opts.ReviewerChanges = &reviewers
+		}
+		if err := metadata.validate(cmd); err != nil {
+			return err
+		}
+		if cmd.Flags().Changed("title") {
+			if strings.TrimSpace(title) == "" {
+				return clierr.Wrap(clierr.Usage, errors.New("pull request title cannot be empty"))
+			}
+			opts.Title = &title
+		}
+		if cmd.Flags().Changed("body") || cmd.Flags().Changed("body-file") {
+			if body, err = a.readBody(cmd, body, file); err != nil {
+				return err
+			}
+			opts.Body = &body
+		}
+		if cmd.Flags().Changed("base") {
+			if strings.TrimSpace(base) == "" {
+				return clierr.Wrap(clierr.Usage, errors.New("--base cannot be empty"))
+			}
+			opts.Base = &base
+		}
+		if cmd.Flags().Changed("allow-maintainer-edit") {
+			opts.AllowMaintainerEdit = &maintainer
+		}
+		if err := validateProjectChanges(addProjects, removeProjects); err != nil {
+			return err
+		}
+		blockers, err := dependencies.changes()
+		if err != nil {
+			return err
+		}
+		if opts == (services.PullEdit{}) && !useEditor && !draft && !ready && !metadata.changed(cmd) && !cmd.Flags().Changed("milestone") && !removeMilestone && len(addProjects)+len(removeProjects)+dependencies.count() == 0 {
+			return errPullNothingToEdit
+		}
+		t, n, err := a.pullSelectorAny(cmd, args)
+		if err != nil {
+			return err
+		}
+		if err := repositoryTeams("add-reviewer", t, reviewers.Add.Teams); err != nil {
+			return err
+		}
+		if err := repositoryTeams("remove-reviewer", t, reviewers.Remove.Teams); err != nil {
+			return err
+		}
+		if blockers, err = a.resolveDependencies(t, []int64{n}, blockers); err != nil {
+			return err
+		}
+		switch {
+		case removeMilestone || milestone == "0" || (cmd.Flags().Changed("milestone") && milestone == ""):
+			var none int64
+			opts.Milestone = &none
+		case milestone != "":
+			id, err := milestoneID(cmd, t, milestone)
+			if err != nil {
+				return err
+			}
+			opts.Milestone = &id
+		}
+		if opts.ReviewerChanges != nil {
+			if err := t.expandMeAll(reviewers.Add.Users, reviewers.Remove.Users); err != nil {
+				return err
+			}
+		}
+		if opts.Labels, opts.Assignees, opts.Changes, err = metadata.resolve(cmd, t); err != nil {
+			return err
+		}
+		service := services.Pulls{Client: t.client, Repository: t.Repo}
+		// before is the pull request ahead of the edit, when read: it tells a failed edit what
+		// was saved.
+		var current services.Pull
+		var before *services.Pull
+		// Without --draft or --ready, a new title keeps the draft state, which BranchSpire reads from it.
+		keepDraft := opts.Title != nil && !draft && !ready
+		if ((draft || ready) && opts.Title == nil) || keepDraft || useEditor {
+			if current, err = service.View(cmd.Context(), n); err != nil {
+				return err
+			}
+			before = &current
+		}
+		login, _ := t.login() // @me among the reviewers needed it already
+		if opts.ReviewerChanges != nil && login != "" && slices.ContainsFunc(reviewers.Add.Users, func(user string) bool { return strings.EqualFold(user, login) }) {
+			if before == nil {
+				if current, err = service.View(cmd.Context(), n); err != nil {
+					return err
+				}
+				before = &current
+			}
+			if strings.EqualFold(current.Author, login) {
+				return clierr.Wrap(clierr.Usage, errors.New("--add-reviewer cannot include @me; BranchSpire does not let the author review their pull request"))
+			}
+		}
+		if keepDraft {
+			draft = current.Draft
+		}
+		if draft || ready {
+			if opts.Title == nil {
+				title = current.Title
+			}
+			if title = draftTitle(title, draft); strings.TrimSpace(title) == "" {
+				return clierr.Wrap(clierr.Usage, errors.New("removing the draft marker leaves an empty title; pass --title"))
+			}
+			opts.Title = &title
+		}
+		if useEditor {
+			if editorDraft, err = a.editDraft(cmd, current.Body); err != nil {
+				return err
+			}
+			opts.Body = &editorDraft.Body
+		}
+		boards, err := loadProjectChanges(cmd.Context(), t, addProjects, removeProjects, true)
+		if err != nil {
+			return err
+		}
+		if len(blockers) > 0 && before == nil { // an issue's number must fail before its dependencies change
+			current, err := service.View(cmd.Context(), n)
+			if err != nil {
+				return err
+			}
+			before = &current
+		}
+		if err := applyDependencies(cmd.Context(), services.Issues{Client: t.client, Repository: t.Repo, Pulls: true}, n, blockers); err != nil {
+			return err
+		}
+		var item services.Pull
+		var failures []error
+		if opts == (services.PullEdit{}) {
+			// Only project boards or dependencies change: there is nothing to send to the pull request itself.
+			if _, err := boards.applyToNumber(cmd.Context(), n); err != nil {
+				return err
+			}
+			item, err = service.View(cmd.Context(), n)
+		} else if item, err = service.EditFrom(cmd.Context(), n, opts, before); err == nil || item.Number != 0 {
+			// Boards change only after the edit, so that a rejected edit leaves them as they were;
+			// one that BranchSpire took in part changes them like the labels.
+			// Boards that already held the pull request, or lacked it, are not named as saved.
+			if sent, boardsErr := boards.applyToNumber(cmd.Context(), n); boardsErr != nil {
+				failures = append(failures, boardsErr)
+			} else if partial, ok := errors.AsType[*services.PartialEditError](err); ok && sent {
+				partial.Saved = append(partial.Saved, "the project boards")
+			}
+		}
+		if err != nil {
+			if item.Number == 0 && len(addProjects)+len(removeProjects) > 0 {
+				return fmt.Errorf("%w; the project boards were not changed", err)
+			}
+			if item.Number != 0 {
+				// BranchSpire refused the labels or the fields of the pull request itself after taking the
+				// other changes. The error names what was not changed; what BranchSpire left out is told
+				// apart from what it refused only when every request succeeded.
+				return errors.Join(err, followUpError(fmt.Sprintf("pull request #%d", n), "edited", failures))
+			}
+			return err
+		}
+		a.done(cmd, "Edited pull request %s", refLabel(t.Repo, n, item.Title))
+		// The edit stands and is reported; what BranchSpire left out fails the command after.
+		return errors.Join(followUpError(fmt.Sprintf("pull request #%d", n), "edited", failures), a.pullEditLeftOut(n, opts, item, t.Repo, issueEditFlags(cmd)), a.pullResult(cmd, t, item))
+	}}
+	cmd.Flags().StringVarP(&title, "title", "t", "", "Pull request title")
+	cmd.Flags().StringVar(&deadline, "deadline", "", "Due `date`: YYYY-MM-DD, RFC3339 or Unix timestamp; only the date counts, as the end of that day in UTC; empty clears it")
+	cmd.Flags().StringVarP(&body, "body", "b", "", "Pull request body (empty clears)")
+	cmd.Flags().StringVarP(&file, "body-file", "F", "", "Read the body from `file`, or - for stdin")
+	cmd.Flags().BoolVarP(&useEditor, "editor", "e", false, "Edit the current body in your editor")
+	cmd.Flags().StringVarP(&base, "base", "B", "", "Base branch")
+	cmd.Flags().BoolVar(&draft, "draft", false, "Mark the pull request as a draft (same as bh pr ready --undo)")
+	cmd.Flags().BoolVar(&ready, "ready", false, "Mark the pull request as ready for review (same as bh pr ready)")
+	cmd.Flags().BoolVar(&maintainer, "allow-maintainer-edit", false, "Allow maintainers to push to the head branch; =false disallows it")
+	cmd.Flags().StringArrayVar(&addProjects, "add-project", nil, "Add the pull request to the project with this ID or `title`, a number being an ID first (repeatable)")
+	cmd.Flags().StringArrayVar(&removeProjects, "remove-project", nil, "Take the pull request off the project with this ID or `title`, a number being an ID first (repeatable)")
+	cmd.Flags().StringVarP(&milestone, "milestone", "m", "", "Milestone title or ID; 0 removes it")
+	cmd.Flags().BoolVar(&removeMilestone, "remove-milestone", false, "Remove the milestone")
+	dependencies.register(cmd, "pull request")
+	metadata.register(cmd)
+	cmd.Flags().StringSliceVar(&reviewers.Add.Users, "add-reviewer", nil, "Request reviews from users, or teams as ORG/TEAM of the repository's organization; @me for yourself")
+	cmd.Flags().StringSliceVar(&reviewers.Remove.Users, "remove-reviewer", nil, "Withdraw review requests from users, or teams as ORG/TEAM")
+	for _, name := range []string{"add-reviewer", "remove-reviewer"} {
+		_ = cmd.RegisterFlagCompletionFunc(name, a.completeUsers())
+	}
+	_ = cmd.RegisterFlagCompletionFunc("base", a.completeBranches())
+	_ = cmd.RegisterFlagCompletionFunc("milestone", a.completeMilestones())
+	cmd.ValidArgsFunction = firstArg(a.completePulls("open"))
+	cmd.Example = `$ bh pr edit 13 --title "Add login support" --add-reviewer carol,acme/core
+$ bh pr edit --base develop
+$ bh pr edit 13 --editor
+$ bh pr edit 13 --add-blocked-by 9 --remove-blocking 20`
+	return jsonOutput[pullDependenciesJSON](cmd)
+}
+
+var errPullNothingToEdit = clierr.Wrap(clierr.Usage, errors.New("nothing to edit; pass a flag such as --title (see bh pr edit --help)"))
+
+// editPullInteractively edits pull request n in the issue edit form, which also asks for its base
+// branch, and sends only what changed.
+func (a *application) editPullInteractively(cmd *cobra.Command, t target, n int64) (err error) {
+	service := services.Pulls{Client: t.client, Repository: t.Repo}
+	current, err := service.View(cmd.Context(), n)
+	if err != nil {
+		return err
+	}
+	selectables, err := services.Issues{Client: t.client, Repository: t.Repo}.EditSelectables(cmd.Context())
+	if err != nil {
+		return err
+	}
+	asIssue := services.Issue{
+		Kind: services.KindPull, Number: n, Title: draftTitle(current.Title, false), Body: current.Body,
+		Assignees: current.Assignees, Milestone: current.Milestone, Labels: current.Labels, Deadline: current.Deadline,
+	}
+	choices := a.issueEditChoices(cmd, t, asIssue, selectables.Assignees, milestoneChoices(selectables.Milestones), labelChoices(selectables.Labels))
+	choices.Base = current.Base
+	values, err := a.deps.IssueEditForm.EditIssue(cmd.Context(), choices)
+	defer finishDraft(&values.Draft, &err)
+	if err != nil {
+		return err
+	}
+	changed := changedIssueFields(asIssue, choices, values)
+	opts := services.PullEdit{
+		Title: changed.Title, Body: changed.Body, Assignees: changed.Assignees, Labels: changed.Labels,
+		Milestone: changed.Milestone, Deadline: changed.Deadline, RemoveDeadline: changed.RemoveDeadline,
+	}
+	if opts.Title != nil {
+		title := draftTitle(*opts.Title, current.Draft) // bh pr ready changes the draft state, as with --title
+		opts.Title = &title
+	}
+	if values.Base != current.Base {
+		opts.Base = &values.Base
+	}
+	if opts == (services.PullEdit{}) {
+		a.warn(cmd, "No changes to pull request %s", refLabel(t.Repo, n, current.Title))
+		return a.pullResult(cmd, t, current)
+	}
+	item, err := service.EditFrom(cmd.Context(), n, opts, &current)
+	if err != nil {
+		return err
+	}
+	a.done(cmd, "Edited pull request %s", refLabel(t.Repo, n, item.Title))
+	return errors.Join(a.pullEditLeftOut(n, opts, item, t.Repo, issueMetadataFields), a.pullResult(cmd, t, item))
+}
+
+// pullEditLeftOut fails, as issue edit does, when pull request n, edited without an error, lacks
+// a change to its milestone, assignees or due date that opts asked for, named by names. BranchSpire
+// leaves them out without an error for an author who cannot write to the pull requests, and drops
+// the due date too when a milestone sends the edit through the issue endpoint.
+func (a *application) pullEditLeftOut(n int64, opts services.PullEdit, item services.Pull, repository string, names issueMetadataNames) error {
+	return a.editLeftOut(services.IssueEdit{
+		Assignees: opts.Assignees, Milestone: opts.Milestone, Deadline: opts.Deadline, RemoveDeadline: opts.RemoveDeadline, Changes: opts.Changes,
+	}, services.Issue{
+		Kind: services.KindPull, Number: n, Assignees: item.Assignees, Milestone: item.Milestone, Deadline: item.Deadline,
+	}, repository, names)
+}
+
+// draftTitle marks a title as a draft, the way BranchSpire recognizes drafts, or removes the marker.
+func draftTitle(title string, draft bool) string {
+	if draft {
+		return services.AddDraftPrefix(title)
+	}
+	return services.StripDraftPrefix(title)
+}
+
+func (a *application) pullReadyCommand() *cobra.Command {
+	var undo bool
+	cmd := &cobra.Command{Use: "ready [<number> | <url> | <branch>]", Short: "Mark a pull request as ready for review", Long: `Mark a draft pull request as ready for review, or with --undo turn it back into a draft.
+
+BranchSpire treats a pull request as a draft while its title starts with "WIP:" or "[WIP]"; bh
+removes or adds that marker.`, Annotations: pullArgumentsAnnotation(nil), Args: usageArgs(cobra.MaximumNArgs(1)), RunE: func(cmd *cobra.Command, args []string) error {
+		t, n, err := a.pullSelector(cmd, args)
+		if err != nil {
+			return err
+		}
+		service := services.Pulls{Client: t.client, Repository: t.Repo}
+		item, err := service.View(cmd.Context(), n)
+		if err != nil {
+			return err
+		}
+		ref := refLabel(t.Repo, n, item.Title)
+		if item.Draft == undo {
+			if undo {
+				a.warn(cmd, "Pull request %s is already a draft", ref)
+			} else {
+				a.warn(cmd, "Pull request %s is already ready for review", ref)
+			}
+		} else {
+			title := draftTitle(item.Title, undo)
+			if strings.TrimSpace(title) == "" {
+				return errors.New("removing the draft marker leaves an empty title; set one with: bh pr edit " + strconv.FormatInt(n, 10) + " --title")
+			}
+			if item, err = service.Edit(cmd.Context(), n, services.PullEdit{Title: &title}); err != nil {
+				return err
+			}
+			if item.Draft != undo && !a.options.dryRun { // a dry run changes nothing to read back
+				return errors.New("the title was changed, but BranchSpire still " + map[bool]string{true: "does not treat", false: "treats"}[undo] + " the pull request as a draft; this instance may use a different draft prefix, so edit the title with: bh pr edit " + strconv.FormatInt(n, 10) + " --title")
+			}
+			if undo {
+				a.done(cmd, "Converted pull request %s to a draft", refLabel(t.Repo, n, item.Title))
+			} else {
+				a.done(cmd, "Marked pull request %s as ready for review", refLabel(t.Repo, n, item.Title))
+			}
+		}
+		return a.pullResult(cmd, t, item)
+	}}
+	cmd.Flags().BoolVar(&undo, "undo", false, "Turn the pull request back into a draft")
+	cmd.ValidArgsFunction = firstArg(a.completePulls("open"))
+	cmd.Example = `$ bh pr ready
+$ bh pr ready 15
+$ bh pr ready 15 --undo`
+	return cmd
+}

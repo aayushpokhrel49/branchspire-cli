@@ -1,0 +1,43 @@
+name: Unit Test On Windows
+
+# Needs a self-hosted runner with a KVM-capable Docker host; see scripts/test-windows.sh.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-test:
+    runs-on: [self-hosted, kvm]
+    timeout-minutes: 90
+    env:
+      DOCKER_CONFIG: /tmp/docker-noauth
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Prepare anonymous docker config
+        run: mkdir -p "$DOCKER_CONFIG" && echo '{}' > "$DOCKER_CONFIG/config.json"
+
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/windows-vm
+          key: windows-vm
+
+      - name: Unit test on Windows
+        id: test-windows
+        run: WINDOWS_TEST_CACHE="$HOME/.cache/windows-vm" make test-windows
+        env:
+          WINDOWS_TEST_TIMEOUT: 45
+
+      - if: always() && steps.test-windows.outputs.save-cache == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/windows-vm
+          key: windows-vm
